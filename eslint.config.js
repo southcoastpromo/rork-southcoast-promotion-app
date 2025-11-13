@@ -1,27 +1,11 @@
-const path = require('path');
-const { defineConfig } = require('eslint/config');
-const expoConfig = require('eslint-config-expo/flat');
+import expo from 'eslint-config-expo';
 
-const rootDir = process.cwd();
-
-module.exports = defineConfig([
-  expoConfig,
+export default [
+  ...expo,
   {
-    ignores: ["dist/*"],
-  },
-  {
-    languageOptions: {
-      parserOptions: {
-        project: path.join(rootDir, 'tsconfig.json'),
-        tsconfigRootDir: rootDir,
-      },
-    },
-    settings: {
-      'import/resolver': {
-        typescript: {
-          project: path.join(rootDir, 'tsconfig.json'),
-        },
-      },
-    },
-  },
-]);
+    rules: {
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'no-console': ['warn', { allow: ['warn', 'error'] }]
+    }
+  }
+];
