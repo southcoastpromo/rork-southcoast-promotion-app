@@ -1,318 +1,590 @@
-# Welcome to your Rork app
+# SouthCoast ProMotion App
 
-## Project info
+Cross-platform **Expo / React Native** booking app for mobile digital billboard campaigns, backed by a **Hono + tRPC API** and an in-memory data store seeded from structured campaign data.
 
-This is a native cross-platform mobile app created with [Rork](https://rork.com)
+This README replaces all previous Markdown reports:
 
-**Platform**: Native iOS & Android app, exportable to web
-**Framework**: Expo Router + React Native
+- `AUDIT_REPORT.md`
+- `RUNBOOK.md`
+- `TECHNICAL_SUMMARY.md`
+- `PASS_FAIL_REPORT.md`
+- `FILTER_ACCESSIBILITY_REPORT.md`
+- `FILTER_ACCESSIBILITY_SUMMARY.md`
+- `MANUAL_ACTIONS.md`
+- `EVIDENCE.md`
 
-## How can I edit this code?
+---
 
-There are several ways of editing your native mobile application.
+## Table of Contents
 
-### **Use Rork**
+1. [Overview](#overview)  
+2. [Architecture](#architecture)  
+   - [System Diagram](#system-diagram)  
+   - [Request Flow](#request-flow)  
+3. [Tech Stack](#tech-stack)  
+4. [Configuration & Environments](#configuration--environments)  
+5. [Getting Started](#getting-started)  
+   - [Prerequisites](#prerequisites)  
+   - [Install & Run](#install--run)  
+   - [Seeding Campaign Data](#seeding-campaign-data)  
+6. [Backend API](#backend-api)  
+   - [Hono Server](#hono-server)  
+   - [tRPC Routers](#trpc-routers)  
+7. [Frontend App](#frontend-app)  
+   - [Navigation Structure](#navigation-structure)  
+   - [Key Screens](#key-screens)  
+8. [Security & Hardening](#security--hardening)  
+9. [Operational Runbook (Condensed)](#operational-runbook-condensed)  
+10. [Development Workflow](#development-workflow)  
+11. [Glossary](#glossary)
 
-Simply visit [rork.com](https://rork.com) and prompt to build your app with AI.
+---
 
-Changes made via Rork will be committed automatically to this GitHub repo.
+## Overview
 
-Whenever you make a change in your local code editor and push it to GitHub, it will be also reflected in Rork.
+SouthCoast ProMotion App is a **native + web** booking surface for mobile digital billboard campaigns:
 
-### **Use your preferred code editor**
+- Customers can **browse available windows** by date, location, and time.
+- Customers can **add slots to a cart** and confirm bookings.
+- Admins can **seed/reset campaign data** via secure admin tools.
 
-If you want to work locally using your own code editor, you can clone this repo and push changes. Pushed changes will also be reflected in Rork.
+The current implementation is:
 
-If you are new to coding and unsure which editor to use, we recommend Cursor. If you're familiar with terminals, try Claude Code.
+- **Client**: Expo Router app (iOS, Android, Web).
+- **API**: Hono + tRPC.
+- **Data**: In-memory store (`lib/database.ts`) seeded from `lib/seed-data.ts`.
 
-The only requirement is having Node.js & Bun installed - [install Node.js with nvm](https://github.com/nvm-sh/nvm) and [install Bun](https://bun.sh/docs/installation)
+This is ideal for demos / pilots. For true production, you’d swap the in-memory store for a persistent database (e.g. Postgres).
 
-Follow these steps:
+---
+
+## Architecture
+
+### System Diagram
+
+```mermaid
+graph LR
+  A[Expo / React Native App<br/>+ Web] -->|HTTPS / tRPC over HTTP| B[Hono API Server<br/>/api/trpc]
+  A -->|HTTPS| C[/health endpoint]
+  B --> D[In-Memory Data Store<br/>lib/database.ts]
+  B --> E[Seed Data<br/>lib/seed-data.ts]
+  B --> F[Audit Logger<br/>lib/audit-logger.ts]
+```
+
+- **Client**: Expo Router React Native app.
+- **Transport**: tRPC over HTTP using `@trpc/react-query`.
+- **API**: Hono server with tRPC adapter (`backend/hono.ts`, `backend/trpc/*`).
+- **State**: In-memory Maps for `Campaign`, `CampaignWindow`, `Booking`.
+- **Seed**: Typed seed data, versioned via `SEED_VERSION`.
+- **Audit**: Structured JSON logging to console (ready to be piped to a real sink).
+
+### Request Flow
+
+```mermaid
+sequenceDiagram
+  participant User
+  participant App as Expo App (React Native)
+  participant tRPC as trpc Client
+  participant API as Hono + tRPC
+  participant DB as In-Memory DB
+
+  User->>App: Open Campaigns tab
+  App->>tRPC: campaigns.getAll({ filters })
+  tRPC->>API: HTTP POST /api/trpc/campaigns.getAll
+  API->>DB: getCampaignWindows() + getAllCampaigns()
+  DB-->>API: Windows + Campaigns
+  API-->>tRPC: Paginated grouped response
+  tRPC-->>App: Data
+  App-->>User: Render campaigns & windows
+
+  User->>App: Book slots
+  App->>tRPC: bookings.create({ windowId, slotsBooked, contact })
+  tRPC->>API: HTTP POST /api/trpc/bookings.create
+  API->>DB: Validate & create Booking
+  API->>DB: Update window.bookedSlots
+  API-->>tRPC: Booking confirmation
+  tRPC-->>App: Confirmation payload
+  App-->>User: Success screen
+```
+
+---
+
+## Tech Stack
+
+**Runtime / Platform**
+
+- **Expo + Expo Router** (iOS / Android / Web)
+- **Node.js** ≥ 20
+- **Bun** ≥ 1.1
+
+**Frontend**
+
+- React Native + Expo
+- `expo-router` for file-based navigation
+- `@trpc/react-query` + `@tanstack/react-query`
+- `lucide-react-native` for icons
+- `@nkzw/create-context-hook` for context helpers
+- `@react-native-async-storage/async-storage` for client persistence
+
+**Backend**
+
+- **Hono** HTTP server (`backend/hono.ts`)
+- **tRPC v11** (`backend/trpc/*`)
+- In-memory DB (`lib/database.ts`)
+- Seed data (`lib/seed-data.ts`, `SEED_VERSION`)
+- Audit logger (`lib/audit-logger.ts`)
+- Sanitisation helpers (`lib/sanitize.ts`)
+
+**Tooling**
+
+- TypeScript (`tsconfig.json`)
+- ESLint 9 (`eslint.config.js`, `eslint-config-expo`)
+- Bun (`bun.lock`, `bun` scripts)
+
+---
+
+## Configuration & Environments
+
+Configuration is via environment variables surfaced through `env.example`.
 
 ```bash
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+# API Configuration
+EXPO_PUBLIC_API_BASE=https://your-api-domain.com  # HTTPS, no trailing slash
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+# Admin Authentication
+ADMIN_TOKEN=your-secure-admin-token-here         # 32+ chars recommended
+```
 
-# Step 3: Install the necessary dependencies.
-bun i
+**Key rules:**
 
-# Step 4: Start the instant web preview of your Rork app in your browser, with auto-reloading of your changes
+- `EXPO_PUBLIC_API_BASE`
+  - Used by `lib/trpc.ts`.
+  - Must be **non-empty**, **HTTPS**, and **no trailing slash**.
+  - The tRPC client hits `${EXPO_PUBLIC_API_BASE}/api/trpc`.
+
+- `ADMIN_TOKEN`
+  - Consumed by `backend/trpc/create-context.ts`.
+  - Must be set on the server.
+  - Admin requests require `Authorization: Bearer <ADMIN_TOKEN>`.
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js ≥ 20
+- Bun ≥ 1.1
+- Git, watchman, etc. (standard Expo stack)
+
+### Install & Run
+
+From the project root:
+
+```bash
+# 1. Install dependencies
+bun install
+
+# 2. Copy environment template
+cp env.example .env
+
+# 3. Edit .env
+#   - Set EXPO_PUBLIC_API_BASE
+#   - Set ADMIN_TOKEN
+
+# 4. Start the app (Rork + Expo)
+bun run start
+
+# Optional: explicit web preview
 bun run start-web
-
-# Step 5: Start iOS preview
-# Option A (recommended):
-bun run start  # then press "i" in the terminal to open iOS Simulator
-# Option B (if supported by your environment):
-bun run start -- --ios
 ```
 
-### **Edit a file directly in GitHub**
+The `start` scripts use `bunx rork start ...` and expect a valid Rork/Expo dev environment.
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+### Seeding Campaign Data
 
-## What technologies are used for this project?
+Admin seeding is exposed via tRPC:
 
-This project is built with the most popular native mobile cross-platform technical stack:
+- Router: `backend/trpc/routes/admin/seed.ts`
+- Procedure: `admin.seed` (protected by `adminProcedure`)
 
-- **React Native** - Cross-platform native mobile development framework created by Meta and used for Instagram, Airbnb, and lots of top apps in the App Store
-- **Expo** - Extension of React Native + platform used by Discord, Shopify, Coinbase, Telsa, Starlink, Eightsleep, and more
-- **Expo Router** - File-based routing system for React Native with support for web, server functions and SSR
-- **TypeScript** - Type-safe JavaScript
-- **React Query** - Server state management
-- **Lucide React Native** - Beautiful icons
+Input schema:
 
-## How can I test my app?
+```ts
+{
+  mode?: "upsert" | "replace"; // default "upsert"
+  reset?: boolean;             // default false
+}
+```
 
-### **On your phone (Recommended)**
+Behaviour:
 
-1. **iOS**: Download the [Rork app from the App Store](https://apps.apple.com/app/rork) or [Expo Go](https://apps.apple.com/app/expo-go/id982107779)
-2. **Android**: Download the [Expo Go app from Google Play](https://play.google.com/store/apps/details?id=host.exp.exponent)
-3. Run `bun run start` and scan the QR code from your development server
+- Reads structured rows from `lib/seed-data.ts`.
+- Transforms into typed `Campaign` and `CampaignWindow` models.
+- Applies according to:
+  - `mode = "upsert"`: non-destructive updates.
+  - `mode = "replace"`: replace existing matches.
+  - `reset = true`: optional hard reset before re-seed.
+- Logs a `seed_*` audit event with:
+  - `rows_total`, `created`, `updated`, `archived`, `duration_ms`, `seed_version`.
 
-### **In your browser**
+---
 
-Run `bun start-web` to test in a web browser. Note: The browser preview is great for quick testing, but some native features may not be available.
+## Backend API
 
-### **iOS Simulator / Android Emulator**
+### Hono Server
 
-You can test Rork apps in Expo Go or Rork iOS app. You don't need XCode or Android Studio for most features.
+File: `backend/hono.ts`
 
-**When do you need Custom Development Builds?**
+- Uses `Hono` with:
+  - CORS middleware (`app.use("*", cors())`).
+  - tRPC adapter mounted under `"/trpc/*"` with server endpoint `"/api/trpc"`.
+- Health endpoints:
+  - `GET /` → `{ status: "ok", message: "API is running" }`
+  - `GET /health` → `{ status, service, version, uptime, timestamp }`
 
-- Native authentication (Face ID, Touch ID, Apple Sign In)
-- In-app purchases and subscriptions
-- Push notifications
-- Custom native modules
+This file is the main API entrypoint you’d deploy (e.g. behind a serverless or container runtime).
 
-Learn more: [Expo Custom Development Builds Guide](https://docs.expo.dev/develop/development-builds/introduction/)
+### tRPC Routers
 
-If you have XCode (iOS) or Android Studio installed:
+Root router: `backend/trpc/app-router.ts`
+
+```ts
+export const appRouter = createTRPCRouter({
+  campaigns: createTRPCRouter({
+    getAll: getCampaignsRoute,
+    getWindow: getCampaignWindowRoute,
+  }),
+  bookings: createTRPCRouter({
+    create: createBookingRoute,
+  }),
+  admin: createTRPCRouter({
+    seed: seedRoute,
+  }),
+});
+```
+
+#### `campaigns.getAll`
+
+- File: `backend/trpc/routes/campaigns/get-all.ts`
+- Input:
+
+  ```ts
+  {
+    date?: string;
+    time?: string;
+    location?: string;
+    page?: number; // default 1
+  }
+  ```
+
+- Logic:
+  - Start with all `CampaignWindow`s from `db.getCampaignWindows()`.
+  - Filter by:
+    - `date` (exact match),
+    - `location` (substring against `campaignName`, case-insensitive),
+    - `time` (substring against time slot string).
+  - Paginate with `limit = 20`, `page` and `total`.
+  - Group the selected windows by `campaignId` and attach matching `Campaign` objects.
+- Returns:
+
+  ```ts
+  {
+    data: {
+      campaign: Campaign | null;
+      windows: CampaignWindow[];
+    }[];
+    pagination: {
+      page: number;
+      limit: number;
+      total: number;
+      pages: number;
+    };
+  }
+  ```
+
+#### `campaigns.getWindow`
+
+- File: `backend/trpc/routes/campaigns/get-window.ts`
+- Input:
+
+  ```ts
+  {
+    campaignId: string;
+    windowId: string;
+  }
+  ```
+
+- Logic:
+  - Fetch window by `windowId` and verify `window.campaignId === campaignId`.
+  - Fetch the parent campaign.
+  - Compute `availableSlots = slotsAvailable - bookedSlots`.
+- Returns: `{ window, campaign, availableSlots }`.
+
+#### `bookings.create`
+
+- File: `backend/trpc/routes/bookings/create.ts`
+- Input:
+
+  ```ts
+  {
+    windowId: string;
+    slotsBooked: number; // >= 1
+    contact: {
+      name: string;
+      email: string;
+      phone: string;
+    };
+  }
+  ```
+
+- Steps:
+  1. Pull client IP from `x-forwarded-for` / `x-real-ip`.
+  2. Fetch window; if missing → `NOT_FOUND`.
+  3. Compute `availableSlots`; if insufficient → `BAD_REQUEST`.
+  4. Sanitize and validate `contact` (`lib/sanitize.ts`).
+  5. Calculate pricing via `calculatePricing()` (`lib/utils.ts`):
+     - Subtotal, discount tier, VAT percentage/amount, total.
+  6. Build `Booking` object with `reference` and timestamps.
+  7. Persist booking and update window in `lib/database.ts`.
+  8. Write structured audit events (`booking_attempt`, `booking_success` / `booking_failure`).
+
+- Error handling:
+  - Uses `TRPCError` to return structured error codes/messages.
+  - Logs failures with details to the audit logger.
+
+#### `admin.seed`
+
+- File: `backend/trpc/routes/admin/seed.ts`
+- Admin-only, as described in [Seeding Campaign Data](#seeding-campaign-data).
+- Logs `seed_upsert`, `seed_replace`, or `seed_reset` with full metrics.
+
+---
+
+## Frontend App
+
+### Navigation Structure
+
+Expo Router tree under `app/`:
+
+- `app/_layout.tsx`
+  - Root layout:
+    - Wraps children with:
+      - `ErrorBoundary`
+      - `trpc.Provider` (`lib/trpc.ts`)
+      - `QueryClientProvider`
+      - `CartProvider` (`contexts/CartContext.tsx`)
+      - `AuthProvider` (`contexts/AuthContext.tsx`)
+      - `GestureHandlerRootView`
+  - Registers a stack with:
+    - `index`
+    - `(tabs)`
+    - `cart`
+    - `window/[campaignId]/[windowId]`
+    - `booking/[campaignId]/[windowId]`
+    - `info/[fieldName]`
+
+- `app/(tabs)/_layout.tsx`
+  - Tabs: `campaigns` and `admin`
+  - Custom tab styling and icons (`Calendar`, `Shield` from `lucide-react-native`).
+
+### Key Screens
+
+- `app/index.tsx`
+  - Landing / marketing-style screen.
+  - Hero image of the ad van, headline, and navigation CTAs.
+
+- `app/(tabs)/campaigns.tsx`
+  - Main campaign list and filter screen.
+  - Uses `trpc.campaigns.getAll` with:
+    - Date range, time-of-day, and location filters.
+  - Persists filter state in `AsyncStorage`.
+  - Integrates with `CartContext` to show item count and quick access.
+  - Formatting helpers (`formatPrice`, `formatDateDisplay`) from `lib/utils.ts`.
+
+- `app/(tabs)/admin.tsx`
+  - Admin control screen.
+  - Uses `AuthContext` for admin token management.
+  - Calls `trpc.admin.seed` mutation.
+  - Displays `LoadingOverlay` during operations.
+
+- `app/cart.tsx`
+  - Cart details, price breakdown, and booking confirmation step.
+  - Uses Zod in `CartContext` to validate cart entries.
+
+- `app/window/[campaignId]/[windowId].tsx`
+  - Window detail screen (slots, price per slot, available slots).
+
+- `app/booking/[campaignId]/[windowId].tsx`
+  - Booking flow confirmation and success.
+
+- `app/info/[fieldName].tsx`
+  - Dynamic info / content pages for specific field names.
+
+### State & Context
+
+- `contexts/AuthContext.tsx`
+  - State:
+    - `isAdmin`, `adminToken`.
+  - Methods:
+    - `login(token)` → sets token, flips `isAdmin`, calls `setAdminAuthToken` (lib/trpc).
+    - `logout()` → clears token and resets `isAdmin`.
+
+- `contexts/CartContext.tsx`
+  - Cart item shape (Zod schema) includes:
+    - `windowId`, `campaignId`, `campaignName`, `date`, `startTime`, `endTime`, etc.
+  - Persists to `AsyncStorage`.
+  - Derives:
+    - `itemCount`
+    - Pricing via `calculatePricing()`.
+
+### Error & Loading UX
+
+- `components/ErrorBoundary.tsx`
+  - Catches uncaught errors in the React subtree.
+  - Shows friendly error UI with reset button.
+
+- `components/LoadingOverlay.tsx`
+  - Full-screen modal with spinner + message.
+  - Used for admin operations and long-running actions.
+
+---
+
+## Security & Hardening
+
+1. **Admin Authentication**
+   - Implemented in `backend/trpc/create-context.ts`.
+   - `adminProcedure`:
+     - Checks `ADMIN_TOKEN` is configured.
+     - Validates `Authorization: Bearer <token>` header.
+   - Invalid / missing token → `TRPCError` with `UNAUTHORIZED`.
+
+2. **Admin Rate Limiting**
+   - `ADMIN_RATE_LIMIT_WINDOW_MS = 60_000` (60s).
+   - `ADMIN_RATE_LIMIT_MAX_REQUESTS = 20` per IP per window.
+   - Uses IP from:
+     - `x-forwarded-for` (first entry),
+     - fallback `x-real-ip`,
+     - `unknown` as final fallback.
+
+3. **Input Sanitisation**
+   - `lib/sanitize.ts`:
+     - Strips `<`, `>`, `javascript:`, and `on*=` attributes.
+     - Validates email with a regex.
+     - Validates phone for basic numeric format.
+   - Applied to booking contact details before persisting.
+
+4. **Audit Logging**
+   - `lib/audit-logger.ts`:
+     - Audit events contain:
+       - `timestamp`, `type`, `ip`, `details`, `success`.
+     - Event types:
+       - `seed_upsert`, `seed_replace`, `seed_reset`
+       - `booking_attempt`, `booking_success`, `booking_failure`
+   - Currently logs to console; easily replaceable with a structured logging sink.
+
+5. **Error Boundary**
+   - Catches unexpected UI errors and avoids blank screens.
+   - Still logs details to console for debugging.
+
+6. **Environment Discipline**
+   - No secrets hardcoded in client or server code.
+   - All sensitive values sourced from `.env` / runtime environment.
+
+---
+
+## Operational Runbook (Condensed)
+
+### Health Checks
+
+- **API base**: `EXPO_PUBLIC_API_BASE`
+- Check:
+  - `GET /` → API OK check.
+  - `GET /health` → service metadata and uptime.
+
+### Common Faults
+
+- **App cannot reach API**
+  - Confirm `EXPO_PUBLIC_API_BASE` in `.env`.
+  - Must be **HTTPS** and match the deployed API.
+  - Confirm `/health` returns status `ok`.
+
+- **Admin actions failing**
+  - Verify `ADMIN_TOKEN` in server env.
+  - Verify the same token is used in the app (admin login).
+  - Check rate limits (heavy usage can hit the 20 req/min cap).
+
+- **Booking failures**
+  - Overbooking: `slotsBooked > availableSlots`.
+  - Invalid contact details: fail sanitisation / Zod.
+  - Inspect logs for `booking_failure` entries.
+
+### Seeding / Resetting
+
+- Use Admin tab in the app to call `admin.seed` with appropriate flags.
+- Confirm:
+  - Seed result badges (created, updated, archived).
+  - `seed_*` events present in audit logs.
+
+---
+
+## Development Workflow
+
+### Lint & Typecheck
 
 ```bash
-# iOS Simulator
-bun run start -- --ios
+# ESLint (no warnings allowed)
+bun run lint
 
-# Android Emulator
-bun run start -- --android
+# TypeScript
+bun run typecheck
 ```
 
-## How can I deploy this project?
+### Data Audit Script
 
-### **Publish to App Store (iOS)**
-
-1. **Install EAS CLI**:
-
-   ```bash
-   bun i -g @expo/eas-cli
-   ```
-
-2. **Configure your project**:
-
-   ```bash
-   eas build:configure
-   ```
-
-3. **Build for iOS**:
-
-   ```bash
-   eas build --platform ios
-   ```
-
-4. **Submit to App Store**:
-   ```bash
-   eas submit --platform ios
-   ```
-
-For detailed instructions, visit [Expo's App Store deployment guide](https://docs.expo.dev/submit/ios/).
-
-### **Publish to Google Play (Android)**
-
-1. **Build for Android**:
-
-   ```bash
-   eas build --platform android
-   ```
-
-2. **Submit to Google Play**:
-   ```bash
-   eas submit --platform android
-   ```
-
-For detailed instructions, visit [Expo's Google Play deployment guide](https://docs.expo.dev/submit/android/).
-
-### **Publish as a Website**
-
-Your React Native app can also run on the web:
-
-1. **Build for web**:
-
-   ```bash
-   eas build --platform web
-   ```
-
-2. **Deploy with EAS Hosting**:
-   ```bash
-   eas hosting:configure
-   eas hosting:deploy
-   ```
-
-Alternative web deployment options:
-
-- **Vercel**: Deploy directly from your GitHub repository
-- **Netlify**: Connect your GitHub repo to Netlify for automatic deployments
-
-## App Features
-
-This template includes:
-
-- **Cross-platform compatibility** - Works on iOS, Android, and Web
-- **File-based routing** with Expo Router
-- **Tab navigation** with customizable tabs
-- **Modal screens** for overlays and dialogs
-- **TypeScript support** for better development experience
-- **Async storage** for local data persistence
-- **Vector icons** with Lucide React Native
-
-## Project Structure
-
-```
-├── app/                    # App screens (Expo Router)
-│   ├── (tabs)/            # Tab navigation screens
-│   │   ├── _layout.tsx    # Tab layout configuration
-│   │   └── index.tsx      # Home tab screen
-│   ├── _layout.tsx        # Root layout
-│   ├── modal.tsx          # Modal screen example
-│   └── +not-found.tsx     # 404 screen
-├── assets/                # Static assets
-│   └── images/           # App icons and images
-├── constants/            # App constants and configuration
-├── app.json             # Expo configuration
-├── package.json         # Dependencies and scripts
-└── tsconfig.json        # TypeScript configuration
-```
-
-## Custom Development Builds
-
-For advanced native features, you'll need to create a Custom Development Build instead of using Expo Go.
-
-### **When do you need a Custom Development Build?**
-
-- **Native Authentication**: Face ID, Touch ID, Apple Sign In, Google Sign In
-- **In-App Purchases**: App Store and Google Play subscriptions
-- **Advanced Native Features**: Third-party SDKs, platform-specifc features (e.g. Widgets on iOS)
-- **Background Processing**: Background tasks, location tracking
-
-### **Creating a Custom Development Build**
+`scripts/auditResult.ts` provides analysis on seed data and configuration:
 
 ```bash
-# Install EAS CLI
-bun i -g @expo/eas-cli
-
-# Configure your project for development builds
-eas build:configure
-
-# Create a development build for your device
-eas build --profile development --platform ios
-eas build --profile development --platform android
-
-# Install the development build on your device and start developing
-bun start --dev-client
+bun scripts/auditResult.ts
 ```
 
-**Learn more:**
+It reads from `lib/seed-data.ts` and prints summaries; it does **not** mutate runtime state.
 
-- [Development Builds Introduction](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Creating Development Builds](https://docs.expo.dev/develop/development-builds/create-a-build/)
-- [Installing Development Builds](https://docs.expo.dev/develop/development-builds/installation/)
+---
 
-## Advanced Features
+## Glossary
 
-### **Add a Database**
+- **Campaign**  
+  A high-level advertising line, typically mapped to a location/route (e.g. “BRIGHTON”, “HASTINGS/BEXHILL”).
 
-Integrate with backend services:
+- **Campaign Window**  
+  A specific date/time window within a campaign:
+  - `date`, `timeSlot`, `slotsAvailable`, `advertsPerSlot`, `pricePerSlot`, `currency`.
 
-- **Supabase** - PostgreSQL database with real-time features
-- **Firebase** - Google's mobile development platform
-- **Custom API** - Connect to your own backend
+- **Slot**  
+  The smallest bookable unit in a campaign window. Each slot offers a fixed number of advert plays.
 
-### **Add Authentication**
+- **Booking**  
+  A confirmed reservation of one or more slots, including:
+  - Contact details,
+  - Pricing breakdown (subtotal, discounts, VAT, total),
+  - Generated reference, timestamps, and status.
 
-Implement user authentication:
+- **Seed Data**  
+  Source-of-truth rows in `lib/seed-data.ts` used to initialise in-memory campaign and window data.
 
-**Basic Authentication (works in Expo Go):**
+- **Seed Version (`SEED_VERSION`)**  
+  Version identifier for current seed set. Exposed in admin seed results and audit logs.
 
-- **Expo AuthSession** - OAuth providers (Google, Facebook, Apple) - [Guide](https://docs.expo.dev/guides/authentication/)
-- **Supabase Auth** - Email/password and social login - [Integration Guide](https://supabase.com/docs/guides/getting-started/tutorials/with-expo-react-native)
-- **Firebase Auth** - Comprehensive authentication solution - [Setup Guide](https://docs.expo.dev/guides/using-firebase/)
+- **Admin Token (`ADMIN_TOKEN`)**  
+  Shared secret used to authenticate admin tRPC routes.
 
-**Native Authentication (requires Custom Development Build):**
+- **tRPC**  
+  Type-safe RPC layer linking React Native client and Hono backend with fully typed procedures.
 
-- **Apple Sign In** - Native Apple authentication - [Implementation Guide](https://docs.expo.dev/versions/latest/sdk/apple-authentication/)
-- **Google Sign In** - Native Google authentication - [Setup Guide](https://docs.expo.dev/guides/google-authentication/)
+- **Hono**  
+  Lightweight HTTP framework powering the API, including health endpoints and tRPC adapter.
 
-### **Add Push Notifications**
+---
 
-Send notifications to your users:
-
-- **Expo Notifications** - Cross-platform push notifications
-- **Firebase Cloud Messaging** - Advanced notification features
-
-### **Add Payments**
-
-Monetize your app:
-
-**Web & Credit Card Payments (works in Expo Go):**
-
-- **Stripe** - Credit card payments and subscriptions - [Expo + Stripe Guide](https://docs.expo.dev/guides/using-stripe/)
-- **PayPal** - PayPal payments integration - [Setup Guide](https://developer.paypal.com/docs/checkout/mobile/react-native/)
-
-**Native In-App Purchases (requires Custom Development Build):**
-
-- **RevenueCat** - Cross-platform in-app purchases and subscriptions - [Expo Integration Guide](https://www.revenuecat.com/docs/expo)
-- **Expo In-App Purchases** - Direct App Store/Google Play integration - [Implementation Guide](https://docs.expo.dev/versions/latest/sdk/in-app-purchases/)
-
-**Paywall Optimization:**
-
-- **Superwall** - Paywall A/B testing and optimization - [React Native SDK](https://docs.superwall.com/docs/react-native)
-- **Adapty** - Mobile subscription analytics and paywalls - [Expo Integration](https://docs.adapty.io/docs/expo)
-
-## I want to use a custom domain - is that possible?
-
-For web deployments, you can use custom domains with:
-
-- **EAS Hosting** - Custom domains available on paid plans
-- **Netlify** - Free custom domain support
-- **Vercel** - Custom domains with automatic SSL
-
-For mobile apps, you'll configure your app's deep linking scheme in `app.json`.
-
-## Troubleshooting
-
-### **App not loading on device?**
-
-1. Make sure your phone and computer are on the same WiFi network
-2. Try using tunnel mode: `bun start -- --tunnel`
-3. Check if your firewall is blocking the connection
-
-### **Build failing?**
-
-1. Clear your cache: `bunx expo start --clear`
-2. Delete `node_modules` and reinstall: `rm -rf node_modules && bun install`
-3. Check [Expo's troubleshooting guide](https://docs.expo.dev/troubleshooting/build-errors/)
-
-### **Need help with native features?**
-
-- Check [Expo's documentation](https://docs.expo.dev/) for native APIs
-- Browse [React Native's documentation](https://reactnative.dev/docs/getting-started) for core components
-- Visit [Rork's FAQ](https://rork.com/faq) for platform-specific questions
-
-## About Rork
-
-Rork builds fully native mobile apps using React Native and Expo - the same technology stack used by Discord, Shopify, Coinbase, Instagram, and nearly 30% of the top 100 apps on the App Store.
-
-Your Rork app is production-ready and can be published to both the App Store and Google Play Store. You can also export your app to run on the web, making it truly cross-platform.
+_This README is the authoritative reference for architecture, setup, and operations for this repo._
